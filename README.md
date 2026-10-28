@@ -53,7 +53,11 @@ venv\Scripts\activate
 pip install numpy matplotlib
 
 ### 4. Executar a simulação
-python sim_navigation.py
+python code/sim_navigation.py               # dashboard animado (janela interativa)
+python code/sim_navigation.py --static      # PNG do estado final + resumo de métricas
+python code/sim_navigation.py --save gif    # exporta a animação (mp4 requer ffmpeg)
+
+Opções: `--step N` (segundos simulados por frame), `--fps N`, `--seed N`. Os ficheiros são guardados em `outputs/`. As métricas (RMS, CEP95, máximo por fase e tempo de convergência HAS) são impressas na consola.
 
 ---
 
