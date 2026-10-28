@@ -63,11 +63,14 @@ Opções: `--step N` (segundos simulados por frame), `--fps N`, `--seed N`. Os f
 
 ## 📊 Estrutura dos Resultados
 
-Ao correr o script, o sistema gera uma animação interativa com três vistas:
+Ao correr o script, o sistema gera uma animação com uma barra de estado (HUD) e quatro vistas:
 
-- **Painel Esquerdo (Trajetória 2D Norte-Este):** Precisão de seguimento de rota e desvio pós-falha.
-- **Painel Superior Direito (Erro Horizontal vs. Tempo):** Decaimento exponencial da convergência PPP (< 20 cm).
-- **Painel Inferior Direito (Satélites Visíveis & Estado):** Efeito de geometria e redundância operacional (*Fallback*).
+- **Painel Esquerdo (Trajetória 2D Este-Norte):** Precisão de seguimento de rota e desvio pós-falha, com lupa de ±8 m centrada no UAV.
+- **Direita, topo (Erro Horizontal vs. Tempo):** Decaimento exponencial da convergência PPP (< 20 cm), em escala logarítmica.
+- **Direita, meio (Satélites Rastreados):** Redundância operacional e *fallback* para Galileo.
+- **Direita, base (Geometria – HDOP):** Qualidade da geometria de cada recetor; o GPS fica sem solução durante o jamming.
+
+A documentação completa da lógica do sistema está em [`DOCUMENTACAO.md`](DOCUMENTACAO.md).
 
 ---
 

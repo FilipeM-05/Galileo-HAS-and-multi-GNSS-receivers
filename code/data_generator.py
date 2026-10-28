@@ -33,6 +33,13 @@ HAS_NOISE_SIGMA = 0.03 # ruído branco residual [m]
 # Direção do erro (passeio aleatório do ângulo para um rasto suave)
 HEADING_WALK_SIGMA = 0.15  # [rad/s]
 
+# Geometria dos satélites (para o cálculo do DOP)
+SAT_EL_MIN = 15.0          # máscara de elevação [deg]
+SAT_EL_MAX = 75.0          # elevação inicial máxima [deg]
+SAT_EL_SWING = 5.0         # amplitude da variação de elevação durante o voo [deg]
+PERIOD_GPS = 43082.0       # período orbital GPS (~11 h 58 min) [s]
+PERIOD_GALILEO = 50680.0   # período orbital Galileo (~14 h 05 min) [s]
+
 
 def make_time():
     """Vetor de tempo de 0 a T_TOTAL inclusive."""
@@ -87,9 +94,72 @@ def apply_error(x_true, y_true, err, heading):
     return x_true + err * np.cos(heading), y_true + err * np.sin(heading)
 
 
+def make_sky(t, n_sats, period, rng):
+    """Azimute e elevação [rad] de n satélites, com movimento orbital lento (T x n).
+
+    Os azimutes iniciais são espalhados pelo céu (com jitter) para uma geometria realista.
+    """
+    az0 = 2 * np.pi * np.arange(n_sats) / n_sats + rng.uniform(-0.4, 0.4, n_sats)
+    el0 = np.radians(rng.uniform(SAT_EL_MIN, SAT_EL_MAX, n_sats))
+    phase = rng.uniform(0, 2 * np.pi, n_sats)
+    w = 2 * np.pi / period
+    az = az0 + w * t[:, None]
+    el = el0 + np.radians(SAT_EL_SWING) * np.sin(w * t[:, None] + phase)
+    return az, el
+
+
+def line_of_sight(az, el):
+    """Vetores unitários recetor->satélite no referencial local ENU (T x n x 3)."""
+    return np.stack([np.cos(el) * np.sin(az),
+                     np.cos(el) * np.cos(az),
+                     np.sin(el)], axis=-1)
+
+
+def compute_hdop(blocks):
+    """HDOP em cada instante, a partir da matriz de geometria G.
+
+    `blocks` é uma lista (uma entrada por constelação) de pares (los[T,n,3], usado[T,n]).
+    Incógnitas: posição (E, N, U) + um enviesamento de relógio por constelação ativa.
+    HDOP = sqrt(Q_EE + Q_NN), com Q = (G^T G)^-1. Se houver menos satélites do que
+    incógnitas não há solução e o HDOP fica NaN.
+    """
+    n_t = blocks[0][0].shape[0]
+    hdop = np.full(n_t, np.nan)
+    for k in range(n_t):
+        active = [los[k][used[k]] for los, used in blocks if used[k].any()]
+        n_unknowns = 3 + len(active)
+        rows = []
+        for j, u in enumerate(active):
+            clock = np.zeros((len(u), len(active)))
+            clock[:, j] = 1.0
+            rows.append(np.hstack([-u, clock]))
+        g = np.vstack(rows)
+        if len(g) < n_unknowns:
+            continue
+        q = np.linalg.inv(g.T @ g)
+        hdop[k] = np.sqrt(q[0, 0] + q[1, 1])
+    return hdop
+
+
+def make_dop(t, sats_gps, sats_galileo, rng):
+    """HDOP do recetor GPS standalone e do recetor Multi-GNSS (GPS + Galileo)."""
+    los_gps = line_of_sight(*make_sky(t, N_GPS_NOMINAL, PERIOD_GPS, rng))
+    los_gal = line_of_sight(*make_sky(t, N_GALILEO, PERIOD_GALILEO, rng))
+    # Satélites usados: durante o jamming só os primeiros sats_gps continuam rastreados
+    used_gps = np.arange(N_GPS_NOMINAL)[None, :] < sats_gps[:, None]
+    used_gal = np.arange(N_GALILEO)[None, :] < sats_galileo[:, None]
+    # O recetor Multi-GNSS exclui o GPS durante o jamming (sinais não fiáveis):
+    # passa a resolver só com Galileo (fallback)
+    used_gps_multi = used_gps & (t < T_JAM)[:, None]
+    hdop_gps = compute_hdop([(los_gps, used_gps)])
+    hdop_multi = compute_hdop([(los_gps, used_gps_multi), (los_gal, used_gal)])
+    return hdop_gps, hdop_multi
+
+
 def generate_sim_data(seed=42):
     """Gera todos os arrays da simulação e devolve-os num dicionário."""
     rng = np.random.default_rng(seed)
+    rng_geo = np.random.default_rng(seed + 1)  # gerador separado: não altera os erros
 
     t = make_time()
     x_true, y_true = make_ground_truth(t)
@@ -104,6 +174,8 @@ def generate_sim_data(seed=42):
     x_gps, y_gps = apply_error(x_true, y_true, err_gps, heading_gps)
     x_has, y_has = apply_error(x_true, y_true, err_has, heading_has)
 
+    hdop_gps, hdop_multi = make_dop(t, sats_gps, sats_galileo, rng_geo)
+
     return {
         "t": t,
         "x_true": x_true, "y_true": y_true,
@@ -111,6 +183,7 @@ def generate_sim_data(seed=42):
         "err_gps": err_gps, "err_has": err_has,
         "x_gps": x_gps, "y_gps": y_gps,
         "x_has": x_has, "y_has": y_has,
+        "hdop_gps": hdop_gps, "hdop_multi": hdop_multi,
     }
 
 

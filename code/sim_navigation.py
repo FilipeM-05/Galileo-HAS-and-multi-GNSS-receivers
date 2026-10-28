@@ -37,6 +37,7 @@ MIN_SATS_FIX = 4         # mínimo de satélites para fix 3D
 ZOOM_HALF = 8.0          # meia-largura da lupa [m]
 ZOOM_TRAIL = 30          # segundos de rasto mostrados na lupa
 ERR_YLIM = (0.02, 1e4)   # limites do eixo de erro [m]
+HDOP_YLIM = (0, 2.5)     # limites do eixo de HDOP
 
 # Limites do mapa: margem extra em baixo para a lupa e a legenda
 MAP_XLIM = (-1.12 * TRAJ_AX, 1.12 * TRAJ_AX)
@@ -132,6 +133,9 @@ def compute_stats(data):
                 "cep95": float(np.percentile(e, 95)),
                 "max": float(e.max()),
             }
+        for rx, key in (("gps", "hdop_gps"), ("has", "hdop_multi")):
+            h = data[key][mask]
+            row[rx]["hdop"] = float(np.nanmean(h)) if np.isfinite(h).any() else float("nan")
         stats["phases"][name] = row
     return stats
 
@@ -140,13 +144,15 @@ def print_stats(stats):
     """Imprime a tabela de métricas na consola."""
     print(f"\nTempo de convergência HAS (< {HAS_REQUIREMENT * 100:.0f} cm): "
           f"{fmt_mmss(stats['t_conv'])} ({stats['t_conv']:.0f} s)\n")
-    header = f"{'Fase':<26}{'Recetor':<10}{'RMS [m]':>12}{'CEP95 [m]':>12}{'Máx [m]':>12}"
+    header = f"{'Fase':<26}{'Recetor':<10}{'RMS [m]':>12}{'CEP95 [m]':>12}{'Máx [m]':>12}{'HDOP méd.':>12}"
     print(header)
     print("-" * len(header))
     for name, row in stats["phases"].items():
         for rx, label in (("gps", "GPS"), ("has", "HAS")):
             m = row[rx]
-            print(f"{name:<26}{label:<10}{m['rms']:>12.2f}{m['cep95']:>12.2f}{m['max']:>12.2f}")
+            hdop = f"{m['hdop']:.2f}" if np.isfinite(m["hdop"]) else "sem sol."
+            print(f"{name:<26}{label:<10}{m['rms']:>12.2f}{m['cep95']:>12.2f}"
+                  f"{m['max']:>12.2f}{hdop:>12}")
     print()
 
 
@@ -359,11 +365,11 @@ def _build_sats(fig, gs_cell, data, t_conv, share_ax):
     ax = fig.add_subplot(gs_cell, sharex=share_ax)
     ax.set_title("Satélites rastreados")
     ax.set_ylabel("N.º de satélites")
-    ax.set_xlabel("Tempo de missão [mm:ss]")
     total_max = int((data["sats_gps"] + data["sats_galileo"]).max())
     ax.set_ylim(0, total_max + 5)
-    ax.yaxis.set_major_locator(MultipleLocator(2))
+    ax.yaxis.set_major_locator(MultipleLocator(4))
     _setup_time_axis(ax)
+    ax.tick_params(labelbottom=False)
 
     jam, _ = _shade_events(ax, t_conv, label_y=None)
     ax.axhline(MIN_SATS_FIX, color=THEME["critical"], lw=1.2, ls=(0, (2, 3)))
@@ -384,12 +390,49 @@ def _build_sats(fig, gs_cell, data, t_conv, share_ax):
     return a
 
 
+def _build_dop(fig, gs_cell, data, t_conv, share_ax):
+    """Painel de geometria: HDOP de cada recetor (NaN = sem solução)."""
+    ax = fig.add_subplot(gs_cell, sharex=share_ax)
+    ax.set_title("Geometria dos satélites (HDOP)")
+    ax.set_ylabel("HDOP")
+    ax.set_xlabel("Tempo de missão [mm:ss]")
+    ax.set_ylim(*HDOP_YLIM)
+    ax.yaxis.set_major_locator(MultipleLocator(0.5))
+    _setup_time_axis(ax)
+
+    jam, _ = _shade_events(ax, t_conv, label_y=None)
+    ax.axhline(1.0, color=THEME["ink_2"], lw=1, ls=(0, (2, 3)),
+               label="HDOP = 1 (geometria ideal)")
+
+    a = {
+        "ax": ax, "jam": jam,
+        "gps": ax.plot([], [], color=THEME["gps"], label="GPS standalone")[0],
+        "multi": ax.plot([], [], color=THEME["has"], label="Multi-GNSS")[0],
+        "gps_pt": ax.plot([], [], "o", ms=8, mfc=THEME["gps"],
+                          mec=THEME["surface"], mew=2, zorder=5)[0],
+        "multi_pt": ax.plot([], [], "D", ms=7, mfc=THEME["has"],
+                            mec=THEME["surface"], mew=2, zorder=5)[0],
+        "gps_lbl": ax.text(0, 0, "", fontsize=9, fontweight="bold",
+                           color=THEME["ink"], va="bottom"),
+        "multi_lbl": ax.text(0, 0, "", fontsize=9, fontweight="bold",
+                             color=THEME["ink"], va="top"),
+        "no_fix": ax.text((T_JAM + T_TOTAL) / 2, 0.80, "▲ GPS sem solução\n2 sats < 4 incógnitas",
+                          transform=ax.get_xaxis_transform(), ha="center", va="top",
+                          fontsize=8.5, fontweight="bold", color=THEME["ink"],
+                          bbox=dict(boxstyle="round,pad=0.3", fc=THEME["surface"],
+                                    ec=THEME["critical"], lw=1)),
+        "cursor": ax.axvline(0, color=THEME["ink"], lw=1, alpha=0.6),
+    }
+    ax.legend(loc="upper left", ncol=3)
+    return a
+
+
 def build_dashboard(data, stats):
     """Cria a figura com todos os artistas (vazios) e devolve-os num dicionário."""
     fig = plt.figure(figsize=(16, 9))
-    gs = GridSpec(3, 2, figure=fig, height_ratios=[0.11, 0.47, 0.42],
+    gs = GridSpec(4, 2, figure=fig, height_ratios=[0.11, 0.40, 0.25, 0.25],
                   width_ratios=[1.12, 1], left=0.05, right=0.985, top=0.975,
-                  bottom=0.065, hspace=0.32, wspace=0.13)
+                  bottom=0.065, hspace=0.42, wspace=0.13)
     t_conv = stats["t_conv"]
     err = _build_error(fig, gs[1, 1], data, t_conv)
     return {
@@ -398,6 +441,7 @@ def build_dashboard(data, stats):
         "map": _build_map(fig, gs[1:, 0], data),
         "err": err,
         "sats": _build_sats(fig, gs[2, 1], data, t_conv, err["ax"]),
+        "dop": _build_dop(fig, gs[3, 1], data, t_conv, err["ax"]),
         "t_conv": t_conv,
     }
 
@@ -477,7 +521,7 @@ def update(a, data, i):
     e["has_lbl"].set_position((lbl_x, eh[-1] * 0.75))
     e["has_lbl"].set_text(f"{eh[-1]:.2f} m")
     e["cursor"].set_xdata([t, t])
-    for art in e["jam"] + a["sats"]["jam"]:
+    for art in e["jam"] + a["sats"]["jam"] + a["dop"]["jam"]:
         art.set_visible(jammed)
     for art in e["conv"]:
         art.set_visible(t >= t_conv)
@@ -490,6 +534,22 @@ def update(a, data, i):
     s["gal"].set_data(tt, sl)
     s["total"].set_data(tt, sg + sl)
     s["cursor"].set_xdata([t, t])
+
+    # Geometria (HDOP)
+    g = a["dop"]
+    hg = d["hdop_gps"][:i + 1]
+    hm = d["hdop_multi"][:i + 1]
+    g["gps"].set_data(tt, hg)
+    g["multi"].set_data(tt, hm)
+    g["gps_pt"].set_data([t], [hg[-1]])
+    g["multi_pt"].set_data([t], [hm[-1]])
+    g["multi_lbl"].set_position((lbl_x, hm[-1] - 0.12))
+    g["multi_lbl"].set_text(f"{hm[-1]:.2f}")
+    g["gps_lbl"].set_visible(np.isfinite(hg[-1]))
+    g["gps_lbl"].set_position((lbl_x, hg[-1] + 0.12 if np.isfinite(hg[-1]) else 0))
+    g["gps_lbl"].set_text(f"{hg[-1]:.2f}")
+    g["no_fix"].set_visible(not np.isfinite(hg[-1]))
+    g["cursor"].set_xdata([t, t])
 
     # HUD
     h = a["hud"]
